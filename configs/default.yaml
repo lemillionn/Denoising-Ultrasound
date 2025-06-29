@@ -1,0 +1,30 @@
+# ── Dataset splits ──────────────────────────────────────────────────────────
+dataset_size: 50000
+val_split:    0.1
+test_split:   0.1
+
+seed:         42
+
+# ── Filepaths for each split ───────────────────────────────────────────────
+train_clean: data/train_clean.npz
+train_noisy: data/train_noisy.npz
+val_clean:   data/val_clean.npz
+val_noisy:   data/val_noisy.npz
+test_clean:  data/test_clean.npz
+test_noisy:  data/test_noisy.npz
+
+# ── Training hyperparameters ────────────────────────────────────────────────
+batch_size:   64
+epochs:       20
+
+lr:           5e-4
+lambda_adv:   5e-4
+
+base_channels: 32
+depths:        [1,2,4]
+
+save_every:    1
+checkpoint_dir: checkpoints
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+test_example_plot: test_denoise.png
