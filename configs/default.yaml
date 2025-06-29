@@ -1,5 +1,5 @@
 # ── Dataset splits ──────────────────────────────────────────────────────────
-dataset_size: 50000
+dataset_size: 100000
 val_split:    0.1
 test_split:   0.1
 
@@ -15,7 +15,7 @@ test_noisy:  data/test_noisy.npz
 
 # ── Training hyperparameters ────────────────────────────────────────────────
 batch_size:   64
-epochs:       20
+epochs:       200
 
 lr:           5e-4
 lambda_adv:   5e-4

@@ -90,19 +90,32 @@ class ResUNet1D(nn.Module):
         self.final = nn.Conv1d(ch, in_channels, kernel_size=1)
 
     def forward(self, x):
-        skips = []
-        for down in self.downs:
-            x = down(x)
-            skips.append(x)
-        x = self.bottleneck(x)
-        for up in self.ups:
-            skip = skips.pop()
-            x = up['upsample'](x)
-            if x.size(-1) != skip.size(-1):
-                diff = skip.size(-1) - x.size(-1)
-                x = F.pad(x, (0, diff))
-            x = up['project'](torch.cat([x, skip], dim=1))
-        return self.final(x)
+      input_length = x.size(-1)  # Save original input length
+
+      skips = []
+      for down in self.downs:
+          x = down(x)
+          skips.append(x)
+
+      x = self.bottleneck(x)
+
+      for up in self.ups:
+          skip = skips.pop()
+          x = up['upsample'](x)
+          if x.size(-1) != skip.size(-1):
+              diff = skip.size(-1) - x.size(-1)
+              x = F.pad(x, (0, diff))
+          x = up['project'](torch.cat([x, skip], dim=1))
+
+      out = self.final(x)
+
+      # ✅ Align output length with input
+      if out.size(-1) != input_length:
+          diff = input_length - out.size(-1)
+          out = F.pad(out, (0, diff))
+
+      return out
+
 
 # ------------------------------------------------------
 # Generator wrapper
@@ -141,3 +154,4 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+

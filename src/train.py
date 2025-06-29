@@ -40,7 +40,7 @@ def main(config_path="configs/default.yaml"):
 
     # Model architecture
     base_ch = int(cfg.get("base_channels", 32))
-    depths  = tuple(cfg.get("depths", [1,2,4]))
+    depths  = tuple(cfg.get("depths", [1, 2, 4]))
 
     # Checkpoint setup
     ckpt_dir = cfg.get("checkpoint_dir", "checkpoints")
@@ -50,7 +50,7 @@ def main(config_path="configs/default.yaml"):
         with open(metrics_csv, "w") as f:
             f.write("epoch,train_D,train_G,val_MSE,lr\n")
 
-    # Data loaders with padding
+    # Data loaders
     train_ds = UltrasoundDataset(train_clean, train_noisy, normalize=True)
     val_ds   = UltrasoundDataset(val_clean,   val_noisy,   normalize=True)
     train_loader = DataLoader(
@@ -85,8 +85,9 @@ def main(config_path="configs/default.yaml"):
     )
 
     # Training loop
-    for epoch in range(1, epochs+1):
-        G.train(); D.train()
+    for epoch in range(1, epochs + 1):
+        G.train()
+        D.train()
         running_D, running_G = 0.0, 0.0
 
         for x, y in train_loader:
@@ -94,26 +95,22 @@ def main(config_path="configs/default.yaml"):
 
             # Discriminator step
             fake = G(x).detach()
-            # crop to match
-            L = min(fake.size(-1), y.size(-1))
-            fake_c = fake[..., :L]
-            real_c = y[..., :L]
-            D_real = D(real_c)
-            D_fake = D(fake_c)
+            D_real = D(y)
+            D_fake = D(fake)
             loss_D = F.mse_loss(D_real, torch.ones_like(D_real)) + \
                      F.mse_loss(D_fake, torch.zeros_like(D_fake))
-            opt_D.zero_grad(); loss_D.backward(); opt_D.step()
+            opt_D.zero_grad()
+            loss_D.backward()
+            opt_D.step()
             running_D += loss_D.item()
 
             # Generator step
             fake = G(x)
-            L = min(fake.size(-1), y.size(-1))
-            fake_c = fake[..., :L]
-            real_c = y[..., :L]
-            rec_loss = F.mse_loss(fake_c, real_c)
-            adv_loss = F.mse_loss(D(fake_c), torch.ones_like(D_fake))
+            rec_loss = F.mse_loss(fake, y)
+            adv_loss = F.mse_loss(D(fake), torch.ones_like(D_fake))
             loss_G = rec_loss + lambda_adv * adv_loss
-            opt_G.zero_grad(); loss_G.backward()
+            opt_G.zero_grad()
+            loss_G.backward()
             nn.utils.clip_grad_norm_(G.parameters(), max_norm=1.0)
             opt_G.step()
             running_G += loss_G.item()
@@ -128,19 +125,20 @@ def main(config_path="configs/default.yaml"):
             for xv, yv in val_loader:
                 xv, yv = xv.to(device), yv.to(device)
                 pred = G(xv)
-                Lp = min(pred.size(-1), yv.size(-1))
-                val_mse += F.mse_loss(pred[..., :Lp], yv[..., :Lp]).item()
+                val_mse += F.mse_loss(pred, yv).item()
         val_mse /= len(val_loader)
 
-        # Log & checkpoint
+        # Logging
         lr_now = opt_G.param_groups[0]['lr']
         print(f"Epoch {epoch}/{epochs}  D: {avg_D:.4f}  G: {avg_G:.4f}  Val_MSE: {val_mse:.6f}  LR: {lr_now:.1e}")
         with open(metrics_csv, "a") as f:
             f.write(f"{epoch},{avg_D:.6f},{avg_G:.6f},{val_mse:.6f},{lr_now:.6e}\n")
 
+        # Save checkpoints
         save_checkpoint(G.state_dict(), os.path.join(ckpt_dir, f"generator_epoch{epoch}.pt"))
         save_checkpoint(D.state_dict(), os.path.join(ckpt_dir, f"discriminator_epoch{epoch}.pt"))
         scheduler_G.step(val_mse)
+
 
 if __name__ == "__main__":
     main()
