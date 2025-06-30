@@ -33,15 +33,12 @@ class SyntheticDataset(torch.utils.data.Dataset):
         return self.N
 
     def __getitem__(self, idx):
-        # sample physics-based parameters
-        f0     = float(np.random.uniform(self.f0_low, self.f0_high))
-        cycles = int(np.random.randint(self.cycles_low, self.cycles_high + 1))
-        noise  = float(np.random.uniform(self.noise_low, self.noise_high))
+        f0     = np.random.uniform(self.f0_low, self.f0_high)
+        cycles = np.random.randint(self.cycles_low, self.cycles_high + 1)
+        noise  = np.random.uniform(self.noise_low, self.noise_high)
 
-        # pass fs into generate_burst
-        clean, noisy, _ = generate_burst(f0, cycles, noise, self.fs)
-
-        # per-sample normalization
+        clean, noisy, _ = generate_burst(f0, cycles, noise)
+        # normalize per-sample
         noisy = (noisy - noisy.mean()) / noisy.std()
         clean = (clean - clean.mean()) / clean.std()
 
@@ -55,23 +52,20 @@ def train(config_path="configs/default.yaml"):
     cfg = yaml.safe_load(open(config_path))
     set_seed(cfg.get("seed", 42))
 
-    # Pull fs from config
-    fs = float(cfg.get("fs", 20e6))
-
     # Build datasets
     train_ds = SyntheticDataset(
         N=int(cfg.get("dataset_size", 10000)),
         f0_range=cfg.get("f0_range", [1e6, 20e6]),
         cycles_range=cfg.get("cycles_range", [1, 5]),
         noise_range=cfg.get("noise_level_range", [0.01, 0.2]),
-        fs=fs
+        fs=float(cfg.get("fs", 20e6))
     )
     val_ds = SyntheticDataset(
         N=int(cfg.get("val_size", 1000)),
         f0_range=cfg.get("f0_range", [1e6, 20e6]),
         cycles_range=cfg.get("cycles_range", [1, 5]),
         noise_range=cfg.get("noise_level_range", [0.01, 0.2]),
-        fs=fs
+        fs=float(cfg.get("fs", 20e6))
     )
 
     train_loader = DataLoader(
@@ -91,14 +85,14 @@ def train(config_path="configs/default.yaml"):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Instantiate models
+    # Models
     G = Generator(
         base_channels=int(cfg.get("base_channels", 64)),
-        depths=tuple(cfg.get("depths", [2, 2, 2]))
+        depths=tuple(cfg.get("depths", [2,2,2]))
     ).to(device)
     D = Discriminator(
         base_channels=int(cfg.get("base_channels", 64)),
-        depths=tuple(cfg.get("depths", [2, 2, 2]))
+        depths=tuple(cfg.get("depths", [2,2,2]))
     ).to(device)
 
     # Optimizers
@@ -110,7 +104,7 @@ def train(config_path="configs/default.yaml"):
 
     num_epochs = int(cfg.get("epochs", 100))
 
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(1, num_epochs+1):
         G.train()
         D.train()
         for noisy, clean in train_loader:
