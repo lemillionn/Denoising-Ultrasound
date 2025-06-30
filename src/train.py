@@ -1,144 +1,153 @@
-# src/train.py
-
 import os
 import yaml
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import torch.nn as nn
+import torch.optim as optim
 
 from models import Generator, Discriminator
-from dataset import UltrasoundDataset, collate_fn
-from utils import set_seed, save_checkpoint
+from src.generate_synthetic import generate_burst
+from dataset import collate_fn
 
 
-def weights_init(m):
-    """Xavier initialization for Conv1d and Linear layers."""
-    if isinstance(m, nn.Conv1d) or isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight)
-        if m.bias is not None:
-            nn.init.constant_(m.bias, 0)
+def set_seed(seed: int):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-def main(config_path="configs/default.yaml"):
-    # Load config & seed
+class SyntheticDataset(torch.utils.data.Dataset):
+    """On-the-fly Gaussian-windowed ultrasound bursts."""
+    def __init__(self, N, f0_range, cycles_range, noise_range, fs):
+        self.N = N
+        self.f0_low, self.f0_high = f0_range
+        self.cycles_low, self.cycles_high = cycles_range
+        self.noise_low, self.noise_high = noise_range
+        self.fs = fs
+
+    def __len__(self):
+        return self.N
+
+    def __getitem__(self, idx):
+        # sample physics-based parameters
+        f0     = float(np.random.uniform(self.f0_low, self.f0_high))
+        cycles = int(np.random.randint(self.cycles_low, self.cycles_high + 1))
+        noise  = float(np.random.uniform(self.noise_low, self.noise_high))
+
+        # pass fs into generate_burst
+        clean, noisy, _ = generate_burst(f0, cycles, noise, self.fs)
+
+        # per-sample normalization
+        noisy = (noisy - noisy.mean()) / noisy.std()
+        clean = (clean - clean.mean()) / clean.std()
+
+        x = torch.from_numpy(noisy).unsqueeze(0)
+        y = torch.from_numpy(clean).unsqueeze(0)
+        return x, y
+
+
+def train(config_path="configs/default.yaml"):
+    # Load config
     cfg = yaml.safe_load(open(config_path))
     set_seed(cfg.get("seed", 42))
 
-    # Dataset params
-    train_clean = cfg["train_clean"]
-    train_noisy = cfg["train_noisy"]
-    val_clean   = cfg["val_clean"]
-    val_noisy   = cfg["val_noisy"]
-    batch_size  = int(cfg.get("batch_size", 64))
+    # Pull fs from config
+    fs = float(cfg.get("fs", 20e6))
 
-    # Training params
-    epochs      = int(cfg.get("epochs", 20))
-    lr          = float(cfg.get("lr", 5e-4))
-    lambda_adv  = float(cfg.get("lambda_adv", 5e-4))
+    # Build datasets
+    train_ds = SyntheticDataset(
+        N=int(cfg.get("dataset_size", 10000)),
+        f0_range=cfg.get("f0_range", [1e6, 20e6]),
+        cycles_range=cfg.get("cycles_range", [1, 5]),
+        noise_range=cfg.get("noise_level_range", [0.01, 0.2]),
+        fs=fs
+    )
+    val_ds = SyntheticDataset(
+        N=int(cfg.get("val_size", 1000)),
+        f0_range=cfg.get("f0_range", [1e6, 20e6]),
+        cycles_range=cfg.get("cycles_range", [1, 5]),
+        noise_range=cfg.get("noise_level_range", [0.01, 0.2]),
+        fs=fs
+    )
 
-    # Model architecture
-    base_ch = int(cfg.get("base_channels", 32))
-    depths  = tuple(cfg.get("depths", [1, 2, 4]))
-
-    # Checkpoint setup
-    ckpt_dir = cfg.get("checkpoint_dir", "checkpoints")
-    os.makedirs(ckpt_dir, exist_ok=True)
-    metrics_csv = os.path.join(ckpt_dir, "metrics.csv")
-    if not os.path.exists(metrics_csv):
-        with open(metrics_csv, "w") as f:
-            f.write("epoch,train_D,train_G,val_MSE,lr\n")
-
-    # Data loaders
-    train_ds = UltrasoundDataset(train_clean, train_noisy, normalize=True)
-    val_ds   = UltrasoundDataset(val_clean,   val_noisy,   normalize=True)
     train_loader = DataLoader(
         train_ds,
-        batch_size=batch_size,
+        batch_size=int(cfg.get("batch_size", 16)),
         shuffle=True,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=int(cfg.get("num_workers", 4)),
         collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=batch_size,
+        batch_size=int(cfg.get("batch_size", 16)),
         shuffle=False,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=int(cfg.get("num_workers", 4)),
         collate_fn=collate_fn
     )
 
-    # Build models
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    G = Generator(base_channels=base_ch, depths=depths).to(device)
-    D = Discriminator(base_channels=base_ch).to(device)
-    G.apply(weights_init)
-    D.apply(weights_init)
 
-    # Optimizers and LR scheduler
-    opt_G = torch.optim.Adam(G.parameters(), lr=lr)
-    opt_D = torch.optim.Adam(D.parameters(), lr=lr)
-    scheduler_G = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt_G, mode='min', factor=0.5, patience=3
-    )
+    # Instantiate models
+    G = Generator(
+        base_channels=int(cfg.get("base_channels", 64)),
+        depths=tuple(cfg.get("depths", [2, 2, 2]))
+    ).to(device)
+    D = Discriminator(
+        base_channels=int(cfg.get("base_channels", 64)),
+        depths=tuple(cfg.get("depths", [2, 2, 2]))
+    ).to(device)
 
-    # Training loop
-    for epoch in range(1, epochs + 1):
+    # Optimizers
+    opt_G = optim.Adam(G.parameters(), lr=float(cfg.get("lr_G", 1e-4)))
+    opt_D = optim.Adam(D.parameters(), lr=float(cfg.get("lr_D", 1e-4)))
+
+    # Loss
+    criterion = nn.MSELoss()
+
+    num_epochs = int(cfg.get("epochs", 100))
+
+    for epoch in range(1, num_epochs + 1):
         G.train()
         D.train()
-        running_D, running_G = 0.0, 0.0
+        for noisy, clean in train_loader:
+            noisy, clean = noisy.to(device), clean.to(device)
 
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
-
-            # Discriminator step
-            fake = G(x).detach()
-            D_real = D(y)
-            D_fake = D(fake)
-            loss_D = F.mse_loss(D_real, torch.ones_like(D_real)) + \
-                     F.mse_loss(D_fake, torch.zeros_like(D_fake))
+            # Train D
             opt_D.zero_grad()
+            fake = G(noisy)
+            loss_D = criterion(D(clean), torch.ones_like(D(clean))) + \
+                     criterion(D(fake.detach()), torch.zeros_like(D(fake)))
             loss_D.backward()
             opt_D.step()
-            running_D += loss_D.item()
 
-            # Generator step
-            fake = G(x)
-            rec_loss = F.mse_loss(fake, y)
-            adv_loss = F.mse_loss(D(fake), torch.ones_like(D_fake))
-            loss_G = rec_loss + lambda_adv * adv_loss
+            # Train G
             opt_G.zero_grad()
+            loss_G = criterion(fake, clean) + \
+                     cfg.get("gan_lambda", 1.0) * criterion(D(fake), torch.ones_like(D(fake)))
             loss_G.backward()
-            nn.utils.clip_grad_norm_(G.parameters(), max_norm=1.0)
             opt_G.step()
-            running_G += loss_G.item()
-
-        avg_D = running_D / len(train_loader)
-        avg_G = running_G / len(train_loader)
 
         # Validation
         G.eval()
-        val_mse = 0.0
+        val_loss = 0.0
         with torch.no_grad():
-            for xv, yv in val_loader:
-                xv, yv = xv.to(device), yv.to(device)
-                pred = G(xv)
-                val_mse += F.mse_loss(pred, yv).item()
-        val_mse /= len(val_loader)
-
-        # Logging
-        lr_now = opt_G.param_groups[0]['lr']
-        print(f"Epoch {epoch}/{epochs}  D: {avg_D:.4f}  G: {avg_G:.4f}  Val_MSE: {val_mse:.6f}  LR: {lr_now:.1e}")
-        with open(metrics_csv, "a") as f:
-            f.write(f"{epoch},{avg_D:.6f},{avg_G:.6f},{val_mse:.6f},{lr_now:.6e}\n")
+            for noisy, clean in val_loader:
+                noisy, clean = noisy.to(device), clean.to(device)
+                pred = G(noisy)
+                val_loss += criterion(pred, clean).item()
+        val_loss /= len(val_loader)
+        print(f"Epoch {epoch}/{num_epochs}, Val Loss: {val_loss:.6f}")
 
         # Save checkpoints
-        save_checkpoint(G.state_dict(), os.path.join(ckpt_dir, f"generator_epoch{epoch}.pt"))
-        save_checkpoint(D.state_dict(), os.path.join(ckpt_dir, f"discriminator_epoch{epoch}.pt"))
-        scheduler_G.step(val_mse)
+        ckpt_dir = cfg.get("checkpoint_dir", "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        torch.save(G.state_dict(), os.path.join(ckpt_dir, f"generator_epoch{epoch}.pt"))
+        torch.save(D.state_dict(), os.path.join(ckpt_dir, f"discriminator_epoch{epoch}.pt"))
 
 
 if __name__ == "__main__":
-    main()
+    train()
